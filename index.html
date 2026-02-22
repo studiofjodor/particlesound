@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DCC Particle Cloud Visualizer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #050505; /* DCC Dark Theme */
+            font-family: 'Courier New', Courier, monospace;
+            color: #ffffff;
+        }
+        canvas {
+            display: block;
+        }
+        #overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            z-index: 10;
+            pointer-events: none;
+        }
+        button {
+            pointer-events: auto;
+            background: transparent;
+            border: 1px solid #fff;
+            color: #fff;
+            padding: 15px 30px;
+            font-size: 16px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            transition: all 0.3s ease;
+        }
+        button:hover {
+            background: #fff;
+            color: #000;
+            box-shadow: 0 0 15px rgba(255, 255, 255, 0.5);
+        }
+        #info {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            font-size: 12px;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <div id="overlay">
+        <h1>DCC // PARTICLE CLOUD</h1>
+        <p>Microphone Access Required</p>
+        <button id="startButton">Initialize Visualizer</button>
+    </div>
+    <div id="info">Freq: <span id="freqVal">0</span> | Particles: 4000</div>
+
+    <!-- Three.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // --- CONFIGURATION ---
+        const CONFIG = {
+            particleCount: 4000,
+            sphereRadius: 15,
+            bassThreshold: 230, // 0-255, trigger point for implosion
+            implosionStrength: 0.8, // How hard they get sucked in
+            returnSpeed: 0.05, // How fast they reform the sphere
+            colorCycleSpeed: 0.001
+        };
+
+        // --- SCENE SETUP ---
+        const scene = new THREE.Scene();
+        // Fog for depth in the "Club" environment
+        scene.fog = new THREE.FogExp2(0x050505, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 40;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        // --- AUDIO SYSTEM ---
+        let analyser, dataArray;
+        let isAudioActive = false;
+        
+        const setupAudio = async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioCtx.createMediaStreamSource(stream);
+                
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 512; // Frequency resolution
+                source.connect(analyser);
+                
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                isAudioActive = true;
+                
+                document.getElementById('overlay').style.opacity = '0';
+                setTimeout(() => document.getElementById('overlay').style.display = 'none', 1000);
+            } catch (err) {
+                console.error("Audio init failed:", err);
+                alert("Microphone access denied. Please allow audio input.");
+            }
+        };
+
+        document.getElementById('startButton').addEventListener('click', setupAudio);
+
+        // --- PARTICLE SYSTEM ---
+        // We need extra attributes to store the "Home" position on the sphere
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(CONFIG.particleCount * 3);
+        const originalPositions = new Float32Array(CONFIG.particleCount * 3);
+        const colors = new Float32Array(CONFIG.particleCount * 3);
+        const sizes = new Float32Array(CONFIG.particleCount);
+
+        const colorObj = new THREE.Color();
+
+        for (let i = 0; i < CONFIG.particleCount; i++) {
+            // SPHERICAL DISTRIBUTION (DCC Variant Requirement)
+            // Using Fibonacci sphere algorithm for even distribution or simple polar for random
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos((Math.random() * 2) - 1);
+            
+            const x = CONFIG.sphereRadius * Math.sin(phi) * Math.cos(theta);
+            const y = CONFIG.sphereRadius * Math.sin(phi) * Math.sin(theta);
+            const z = CONFIG.sphereRadius * Math.cos(phi);
+
+            const i3 = i * 3;
+            
+            // Set current position
+            positions[i3] = x;
+            positions[i3 + 1] = y;
+            positions[i3 + 2] = z;
+
+            // Store "Home" position for return mechanics
+            originalPositions[i3] = x;
+            originalPositions[i3 + 1] = y;
+            originalPositions[i3 + 2] = z;
+
+            // Initial Colors (will be overwritten by HSL logic)
+            colorObj.setHSL(Math.random(), 0.7, 0.5);
+            colors[i3] = colorObj.r;
+            colors[i3 + 1] = colorObj.g;
+            colors[i3 + 2] = colorObj.b;
+
+            sizes[i] = Math.random() * 0.5;
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+        // Shader Material for better performance & look than basic PointsMaterial
+        // Allows sizing particles in perspective
+        const material = new THREE.PointsMaterial({
+            size: 0.8,
+            vertexColors: true,
+            blending: THREE.AdditiveBlending,
+            depthTest: false,
+            transparent: true,
+            opacity: 0.8
+        });
+
+        const particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+
+        // --- ANIMATION LOOP ---
+        let time = 0;
+
+        function animate() {
+            requestAnimationFrame(animate);
+            time += CONFIG.colorCycleSpeed;
+
+            // Rotation of the whole cloud
+            particles.rotation.y += 0.002;
+            particles.rotation.z += 0.001;
+
+            if (isAudioActive && analyser) {
+                analyser.getByteFrequencyData(dataArray);
+
+                // Calculate Frequency Bands
+                const bass = dataArray.slice(0, 20).reduce((a, b) => a + b, 0) / 20; // Lows
+                const mid = dataArray.slice(20, 100).reduce((a, b) => a + b, 0) / 80; // Mids
+                const high = dataArray.slice(100, 200).reduce((a, b) => a + b, 0) / 100; // Highs
+
+                // Display Debug Info
+                document.getElementById('freqVal').innerText = Math.round(bass);
+
+                // --- DCC LOGIC: Bass Implosion ---
+                // If bass hits hard, target is center (0,0,0). Otherwise, target is surface.
+                const isBassHit = bass > CONFIG.bassThreshold;
+                const explosionFactor = bass / 255; // Normalized 0-1
+
+                const posAttr = geometry.attributes.position;
+                const colAttr = geometry.attributes.color;
+
+                for (let i = 0; i < CONFIG.particleCount; i++) {
+                    const i3 = i * 3;
+                    
+                    const ox = originalPositions[i3];
+                    const oy = originalPositions[i3 + 1];
+                    const oz = originalPositions[i3 + 2];
+
+                    let tx, ty, tz; // Target positions
+
+                    if (isBassHit) {
+                        // IMPLODE: Target is center (0,0,0)
+                        // Add some randomness so they don't collapse to a single singularity
+                        const jitter = 2;
+                        tx = (Math.random() - 0.5) * jitter;
+                        ty = (Math.random() - 0.5) * jitter;
+                        tz = (Math.random() - 0.5) * jitter;
+                    } else {
+                        // RETURN: Target is original sphere shell
+                        // Add some "breathing" based on mids/highs
+                        const expansion = 1 + (mid / 255) * 0.5;
+                        tx = ox * expansion;
+                        ty = oy * expansion;
+                        tz = oz * expansion;
+                    }
+
+                    // Lerp current position to target
+                    // "Implosion" is fast, "Return" is slower/elastic
+                    const speed = isBassHit ? CONFIG.implosionStrength : CONFIG.returnSpeed;
+                    
+                    posAttr.array[i3] += (tx - posAttr.array[i3]) * speed;
+                    posAttr.array[i3 + 1] += (ty - posAttr.array[i3 + 1]) * speed;
+                    posAttr.array[i3 + 2] += (tz - posAttr.array[i3 + 2]) * speed;
+
+                    // --- HSL COLORS ---
+                    // Hue cycles over time
+                    // Saturation depends on Highs (sparkle)
+                    // Lightness depends on Audio Amplitude (brightness)
+                    
+                    // Hue: Base time + offset by particle index for gradient
+                    const hue = (time + (i * 0.0001)) % 1; 
+                    const saturation = 0.5 + (high / 255);
+                    const lightness = 0.3 + (explosionFactor * 0.7); // Bright on beat
+
+                    colorObj.setHSL(hue, saturation, lightness);
+                    
+                    colAttr.array[i3] = colorObj.r;
+                    colAttr.array[i3 + 1] = colorObj.g;
+                    colAttr.array[i3 + 2] = colorObj.b;
+                }
+
+                posAttr.needsUpdate = true;
+                colAttr.needsUpdate = true;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- RESIZE ---
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
